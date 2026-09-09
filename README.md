@@ -1,21 +1,29 @@
-# url-pattern-list
+# @open-element/url-pattern-list
 
-Efficiently match URL paths against a collection of URL patterns using an
-optimized prefix tree data structure.
+Efficiently match URL paths against a collection of URL patterns using a
+fixed pathname-literal index with conservative fallback.
+
+> **Fork note:** this is the OpenElement-maintained fork of
+> [justinfagnani/url-pattern-list](https://github.com/justinfagnani/url-pattern-list)
+> v0.5.0. See [PROVENANCE.md](./PROVENANCE.md) for sources and license, and
+> [DIVERGENCE.md](./DIVERGENCE.md) for what differs and why.
 
 ## Overview
 
-`url-pattern-list` is a JavaScript library that provides an optimized way to
+`url-pattern-list` is a JavaScript library that provides an efficient way to
 match URLs against multiple
 [URLPattern](https://developer.mozilla.org/en-US/docs/Web/API/URLPattern)
-instances. Instead of matching URLs by linearly testing URLs against a list of
-patterns, `URLPatternList` uses a prefix tree to share common pattern prefixes
-and reduce the number of checks that need to be performed to find a match.
+instances. Instead of testing every pattern linearly, `URLPatternList`
+indexes patterns whose pathname is a canonical literal in a fixed prefix
+tree, keeps all other patterns in a conservative list, and merges both by
+registration order at match time — so only patterns that can possibly match
+are exec'd.
 
-`URLPatternList` has the same matching semantics as scanning a linear list of
-patterns, and it tested against such a linear list to ensure correctness. The
-first `URLPattern` (in the order patterns were added to the list) that matches a
-URL is returned as the match.
+`URLPatternList` has exactly the same matching semantics as scanning a
+linear list of patterns, and is differentially tested against such a linear
+oracle for both native and polyfill URLPattern constructors. The first
+pattern (in the order patterns were added to the list) whose complete
+`exec()` matches a URL is returned as the match.
 
 Patterns are added to the list along with an additional value that is returned
 with the match. This makes it easy to associate a URLPattern with metadata or an
@@ -24,13 +32,13 @@ object like a server route handler.
 ## Installation
 
 ```sh
-npm i url-pattern-list
+npm i @open-element/url-pattern-list
 ```
 
 ## Quick Start
 
 ```typescript
-import {URLPatternList} from 'url-pattern-list';
+import {URLPatternList} from '@open-element/url-pattern-list';
 
 // Create a new pattern list
 const routes = new URLPatternList<string>();
@@ -50,33 +58,20 @@ if (match) {
 
 ## Performance
 
-Benchmarks show that the prefix tree-based URLPatternList is significantly
-faster than linear scanning. The optimized version is 2-3x faster to match for
-small (10) sets of patterns, and up to 20-30x faster for large (2000) sets of
-patterns.
+Lookup cost is driven by the number of candidate patterns exec'd, not the
+number of patterns registered: static-heavy workloads exec a handful of
+candidates at any scale, while workloads dominated by non-literal patterns
+(regex, groups, wildcards) degrade gracefully to linear scan. Benchmarks
+cover construction, hit, miss and memory against a linear oracle and
+upstream v0.5.0; see [BENCHMARKS.md](./BENCHMARKS.md) for numbers and
+methodology.
 
 To run the benchmark on your machine:
 
 ```sh
+npm i --prefix .tmp-upstream url-pattern-list@0.5.0 # optional comparison
 npm run benchmark
 ```
-
-### Prefix Tree Optimization for All URL Components
-
-URLPatternList builds prefix trees not just for pathname components, but for all
-URL components including search parameters and hash fragments. To enable prefix
-sharing across all components, the parser splits fixed text by `/` even in
-search and hash components.
-
-This design choice optimizes for common real-world patterns where path-like
-structures appear in search parameters (e.g., `?path=/api/users/123`) and hash
-fragments (e.g., `#/admin/dashboard/settings`). By splitting these components
-by `/`, the prefix tree can share common prefixes like `/api` or `/admin`
-across different patterns, leading to better performance.
-
-While this means search/hash patterns like `path=/admin/users` are stored as
-multiple tree nodes rather than a single node, the prefix sharing benefits
-typically outweigh this cost in realistic usage scenarios.
 
 ## API Reference
 
@@ -85,14 +80,17 @@ typically outweigh this cost in realistic usage scenarios.
 The main class for managing and matching URL patterns.
 
 ```ts
-import {URLPatternList} from 'url-pattern-list';
+import {URLPatternList} from '@open-element/url-pattern-list';
 ```
 
 #### Methods
 
-##### `addPattern(pattern: URLPattern, value: T): void`
+##### `addPattern(pattern: ListPattern, value: T): void`
 
-Add a URL pattern to the collection with an associated value.
+Add a URL pattern to the collection with an associated value. `ListPattern`
+is any object with a `pathname` getter and the `exec()` method of the
+URLPattern interface — native `URLPattern` and `urlpattern-polyfill`
+instances both work.
 
 ```typescript
 const list = new URLPatternList<RouteHandler>();
@@ -101,7 +99,9 @@ list.addPattern(new URLPattern({pathname: '/users/:id'}), handleUserDetail);
 
 ##### `match(url: string | URL, baseUrl?: string): URLPatternListMatch<T> | null`
 
-Match a URL against all patterns, returning the first match found.
+Match a URL against all patterns, returning the first match found. Relative
+string input requires `baseUrl`; invalid input throws a `TypeError`, even
+for an empty list.
 
 ```typescript
 const match = list.match('/users/123', 'https://example.com');
@@ -110,6 +110,11 @@ if (match) {
   // match.value contains your associated value
 }
 ```
+
+##### `candidateCount(url: string | URL, baseUrl?: string): number`
+
+Diagnostic upper bound on how many patterns `match()` would exec for the
+given input. Not part of the matching semantics.
 
 ### Types
 
@@ -124,21 +129,23 @@ interface URLPatternListMatch<T> {
 
 ## Browser Support
 
-This library requires
+This library works with any
 [URLPattern](https://developer.mozilla.org/en-US/docs/Web/API/URLPattern)
-support:
+implementation you supply — native:
 
 - Chrome 95+
 - Firefox 142+ (Preview support)
 - Safari 26.0+ (Preview support)
 
-For older browsers, you can use a [URLPattern
-polyfill](https://github.com/kenchris/urlpattern-polyfill).
+— or the [URLPattern
+polyfill](https://github.com/kenchris/urlpattern-polyfill) (patterns built
+from either constructor can be mixed in one list).
 
 ## Visualizer
 
-This package includes a visualizer utility to help understand the tree structure
-of a list. See [`visualizer.md`](./visualizer.md) for more information.
+The upstream visualizer was removed in 0.6.0 because it rendered the
+internals of the removed per-component prefix tree. See
+[DIVERGENCE.md](./DIVERGENCE.md).
 
 ## Contributing
 
