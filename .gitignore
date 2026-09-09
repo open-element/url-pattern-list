@@ -1,16 +1,12 @@
 /node_modules
 /.wireit
 /.tsbuildinfo
+/.tmp-upstream
 
 /benchmark
-/lib
 /test
 
 /index.js
 /index.js.map
 /index.d.ts
 /index.d.ts.map
-/visualizer.js
-/visualizer.js.map
-/visualizer.d.ts
-/visualizer.d.ts.map

@@ -1,6 +1,6 @@
 {
-  "name": "url-pattern-list",
-  "version": "0.5.0",
+  "name": "@open-element/url-pattern-list",
+  "version": "0.6.0",
   "description": "Efficiently match URLs against a collection of URL patterns",
   "type": "module",
   "main": "index.js",
@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/justinfagnani/url-pattern-list.git"
+    "url": "git+https://github.com/open-element/url-pattern-list.git"
   },
   "keywords": [
     "url",
@@ -24,36 +24,27 @@
   "author": "Justin Fagnani <justin@fagnani.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/justinfagnani/url-pattern-list/issues"
+    "url": "https://github.com/open-element/url-pattern-list/issues"
   },
-  "homepage": "https://github.com/justinfagnani/url-pattern-list#readme",
+  "homepage": "https://github.com/open-element/url-pattern-list#readme",
   "devDependencies": {
     "@types/node": "^24.2.0",
     "prettier": "^3.6.2",
     "prettier-plugin-curly": "^0.3.2",
     "typescript": "^5.9.2",
+    "urlpattern-polyfill": "^10.1.0",
     "wireit": "^0.14.12"
   },
   "files": [
     "index.js",
     "index.d.ts",
     "index.js.map",
-    "index.d.ts.map",
-    "visualizer.js",
-    "visualizer.d.ts",
-    "visualizer.js.map",
-    "visualizer.d.ts.map",
-    "lib",
-    "visualizer.md"
+    "index.d.ts.map"
   ],
   "exports": {
     ".": {
       "types": "./index.d.ts",
       "default": "./index.js"
-    },
-    "./visualizer.js": {
-      "types": "./visualizer.d.ts",
-      "default": "./visualizer.js"
     }
   },
   "wireit": {
@@ -64,9 +55,7 @@
         "src/**/*.ts"
       ],
       "outputs": [
-        "index.{js,d.ts,js.map,d.ts.map}",
-        "visualizer.{js,d.ts,js.map,d.ts.map}",
-        "lib"
+        "index.{js,d.ts,js.map,d.ts.map}"
       ],
       "clean": "if-file-deleted"
     },
@@ -79,7 +68,7 @@
       "output": []
     },
     "benchmark": {
-      "command": "node --enable-source-maps benchmark/benchmark.js",
+      "command": "node --expose-gc --enable-source-maps benchmark/benchmark.js",
       "dependencies": [
         "build"
       ],

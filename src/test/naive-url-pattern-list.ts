@@ -9,10 +9,14 @@
  * This implementation is used in tests to verify that the optimized
  * URLPatternList produces identical results while providing better performance.
  */
-import type {URLPatternListItem, URLPatternListMatch} from '../index.js';
+import type {
+  ListPattern,
+  URLPatternListItem,
+  URLPatternListMatch,
+} from '../index.js';
 
 export interface URLPatternListLike<T> {
-  addPattern(pattern: URLPattern, value: T): void;
+  addPattern(pattern: ListPattern, value: T): void;
   match(url: string, baseUrl?: string): URLPatternListMatch<T> | null;
 }
 
@@ -26,7 +30,7 @@ export class NaiveURLPatternList<T> implements URLPatternListLike<T> {
   /**
    * Add a URL pattern to the collection.
    */
-  addPattern(pattern: URLPattern, value: T): void {
+  addPattern(pattern: ListPattern, value: T): void {
     this.#patterns.push({sequence: 0, pattern, value});
   }
 
@@ -35,17 +39,14 @@ export class NaiveURLPatternList<T> implements URLPatternListLike<T> {
    * Returns the first pattern that matches (preserving order).
    */
   match(url: string, baseUrl?: string): URLPatternListMatch<T> | null {
+    const fullURL = new URL(String(url), baseUrl).href;
     for (const item of this.#patterns) {
-      const matches = baseUrl
-        ? item.pattern.test(url, baseUrl)
-        : item.pattern.test(url);
-      if (matches) {
-        const result = baseUrl
-          ? item.pattern.exec(url, baseUrl)
-          : item.pattern.exec(url);
-        if (result !== null) {
-          return {result, value: item.value};
-        }
+      const result =
+        baseUrl === undefined
+          ? item.pattern.exec(fullURL)
+          : item.pattern.exec(fullURL, baseUrl);
+      if (result !== null) {
+        return {result, value: item.value};
       }
     }
     return null;
