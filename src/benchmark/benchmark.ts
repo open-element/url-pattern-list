@@ -1,420 +1,305 @@
 /**
  * @fileoverview
  *
- * URLPatternList Benchmark
+ * URLPatternList benchmark: construction, hit, miss and memory.
  *
- * Benchmarks the optimized URLPatternList against the naive linear
- * implementation to demonstrate the performance benefits of the prefix tree
- * optimization.
+ * Compares three implementations:
+ * - this fork's URLPatternList (fixed pathname-literal index + conservative
+ *   set, merged by sequence)
+ * - NaiveURLPatternList (ordered-linear oracle, from src/test)
+ * - upstream url-pattern-list@0.5.0, installed separately into
+ *   .tmp-upstream/ (npm i --prefix .tmp-upstream url-pattern-list@0.5.0) or
+ *   pointed to with the UPL_UPSTREAM_050 environment variable; skipped when
+ *   absent
  *
- * This benchmark creates scenarios with varying numbers of patterns and tests
- * different types of pattern matching workloads to show where the optimization
- * provides the most benefit.
+ * Run with: npm run benchmark (adds --expose-gc via wireit).
+ *
+ * Methodology: per scenario, patterns are constructed once (native
+ * URLPattern) and shared across implementations. Construction time covers
+ * list building only. Hit/miss timings are medians of 5 samples of
+ * per-lookup means, implementations measured round-robin after a warmup.
+ * Retained memory is the heapUsed delta across a gc()-bracketed list build;
+ * transient memory is the heapUsed delta across K lookups without gc,
+ * divided by K (no GC is expected mid-loop at these allocation volumes;
+ * treat as approximate). candidateCount is reported where available.
  */
 
+import {fileURLToPath} from 'node:url';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {URLPatternList} from '../index.js';
 import {NaiveURLPatternList} from '../test/naive-url-pattern-list.js';
 
-interface BenchmarkResult {
-  name: string;
-  opsPerSecond: number;
-  avgTimeMs: number;
-  totalTimeMs: number;
+const gc = (globalThis as {gc?: () => void}).gc;
+if (gc === undefined) {
+  throw new Error('Run with node --expose-gc (npm run benchmark does)');
 }
 
-interface URLPatternListLike<T> {
-  addPattern(pattern: URLPattern, value: T): void;
+interface AnyList {
+  addPattern(pattern: URLPattern, value: number): void;
   match(
-    path: string,
+    url: string,
     baseUrl?: string,
-  ): {result: URLPatternResult; value: T} | null;
+  ): {result: URLPatternResult; value: number} | null;
+  candidateCount?: (url: string, baseUrl?: string) => number;
 }
 
-/**
- * Run benchmarks for both implementations in round-robin fashion.
- */
-function benchmarkRoundRobin(
-  optimizedFn: () => void,
-  naiveFn: () => void,
-  iterations: number = 10000,
-): {optimized: BenchmarkResult; naive: BenchmarkResult} {
-  // Warm up both functions
-  const warmupIterations = Math.min(200, iterations / 10);
-  for (let i = 0; i < warmupIterations; i++) {
-    optimizedFn();
-    naiveFn();
-  }
-
-  let optimizedTotalTime = 0;
-  let naiveTotalTime = 0;
-
-  // Run alternating rounds
-  for (let round = 0; round < iterations; round++) {
-    // Run optimized implementation
-    const optimizedStart = performance.now();
-    optimizedFn();
-    const optimizedEnd = performance.now();
-    optimizedTotalTime += optimizedEnd - optimizedStart;
-
-    // Run naive implementation
-    const naiveStart = performance.now();
-    naiveFn();
-    const naiveEnd = performance.now();
-    naiveTotalTime += naiveEnd - naiveStart;
-  }
-
-  const optimizedAvgTime = optimizedTotalTime / iterations;
-  const naiveAvgTime = naiveTotalTime / iterations;
-
-  return {
-    optimized: {
-      name: 'URLPatternList (optimized)',
-      opsPerSecond: 1000 / optimizedAvgTime,
-      avgTimeMs: optimizedAvgTime,
-      totalTimeMs: optimizedTotalTime,
-    },
-    naive: {
-      name: 'NaiveURLPatternList (linear)',
-      opsPerSecond: 1000 / naiveAvgTime,
-      avgTimeMs: naiveAvgTime,
-      totalTimeMs: naiveTotalTime,
-    },
+const upstreamModulePath =
+  process.env.UPL_UPSTREAM_050 ??
+  path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '.tmp-upstream',
+    'node_modules',
+    'url-pattern-list',
+    'index.js',
+  );
+let UpstreamURLPatternList: (new () => AnyList) | undefined;
+try {
+  const module = (await import(upstreamModulePath)) as {
+    URLPatternList: new () => AnyList;
   };
+  UpstreamURLPatternList = module.URLPatternList;
+} catch {
+  console.log(
+    JSON.stringify({
+      note:
+        `upstream v0.5.0 not found at ${upstreamModulePath}; skipping. ` +
+        'Install with: npm i --prefix .tmp-upstream url-pattern-list@0.5.0',
+    }),
+  );
 }
 
-/**
- * Generate realistic URL patterns for testing.
- *
- * Creates a mix of patterns that simulate real-world API routing scenarios:
- * - 10% Fixed patterns: `/api/v1/users`, `/v2/posts/create`
- * - 50% Single parameter patterns: `/api/v1/users/:id`, `/v2/posts/:id/edit`
- * - 25% Multiple parameter patterns: `/api/v1/users/:id/posts/:subId`
- * - 10% Wildcard patterns: `/api/v1/files/*`
- * - 5% Complex patterns with regex: `/api/v1/products/:id(\\d+)/data`
- *
- * This distribution tests prefix tree sharing effectiveness since many patterns
- * share common prefixes like `/api/v1`, `/api/v2`, etc.
- */
-function generatePatterns(
-  count: number,
-): Array<{pattern: string; value: string}> {
-  const patterns: Array<{pattern: string; value: string}> = [];
+const implementations: Array<{name: string; create: () => AnyList}> = [
+  {name: 'fork-0.6.0', create: () => new URLPatternList<number>()},
+  {name: 'linear-oracle', create: () => new NaiveURLPatternList<number>()},
+];
+if (UpstreamURLPatternList !== undefined) {
+  const Ctor = UpstreamURLPatternList;
+  implementations.push({name: 'upstream-0.5.0', create: () => new Ctor()});
+}
 
-  // Common API patterns
-  const apiPrefixes = ['/api/v1', '/api/v2', '/v1', '/v2', ''];
+interface Scenario {
+  readonly name: string;
+  readonly patternInits: ReadonlyArray<URLPatternInit>;
+  readonly hit: string;
+  readonly miss: string;
+}
+
+/** Mostly static routes with shared prefixes, plus ~10% parameter routes. */
+const realisticPatterns = (count: number): Array<URLPatternInit> => {
+  const inits: Array<URLPatternInit> = [];
   const resources = [
     'users',
     'posts',
     'comments',
-    'products',
     'orders',
-    'categories',
+    'products',
     'articles',
-    'reviews',
     'photos',
-    'videos',
     'files',
-    'documents',
-    'projects',
-    'tasks',
-    'teams',
-    'organizations',
-    'groups',
-    'events',
-    'notifications',
-    'messages',
-    'reports',
-    'analytics',
-    'settings',
   ];
-
-  const actions = ['', '/edit', '/delete', '/create', '/list', '/search'];
-
-  // Generate base patterns
-  let patternIndex = 0;
-
-  // Fixed patterns (10% of patterns)
-  for (let i = 0; i < Math.floor(count * 0.1) && patternIndex < count; i++) {
-    const prefix = apiPrefixes[i % apiPrefixes.length];
+  for (let i = 0; i < count; i++) {
     const resource = resources[i % resources.length];
-    const action = actions[i % actions.length];
-    patterns.push({
-      pattern: `${prefix}/${resource}${action}`,
-      value: `fixed-${patternIndex}`,
-    });
-    patternIndex++;
-  }
-
-  // Single parameter patterns (50% of patterns)
-  for (let i = 0; i < Math.floor(count * 0.5) && patternIndex < count; i++) {
-    const prefix = apiPrefixes[i % apiPrefixes.length];
-    const resource = resources[i % resources.length];
-    const action = actions[i % actions.length];
-    patterns.push({
-      pattern: `${prefix}/${resource}/:id${action}`,
-      value: `param-${patternIndex}`,
-    });
-    patternIndex++;
-  }
-
-  // Multiple parameter patterns (25% of patterns)
-  for (let i = 0; i < Math.floor(count * 0.25) && patternIndex < count; i++) {
-    const prefix = apiPrefixes[i % apiPrefixes.length];
-    const resource1 = resources[i % resources.length];
-    const resource2 = resources[(i + 1) % resources.length];
-    patterns.push({
-      pattern: `${prefix}/${resource1}/:id/${resource2}/:subId`,
-      value: `multi-param-${patternIndex}`,
-    });
-    patternIndex++;
-  }
-
-  // Wildcard patterns (10% of patterns)
-  for (let i = 0; i < Math.floor(count * 0.1) && patternIndex < count; i++) {
-    const prefix = apiPrefixes[i % apiPrefixes.length];
-    const resource = resources[i % resources.length];
-    patterns.push({
-      pattern: `${prefix}/${resource}/*`,
-      value: `wildcard-${patternIndex}`,
-    });
-    patternIndex++;
-  }
-
-  // Fill remaining with complex patterns (5% of patterns)
-  while (patternIndex < count) {
-    const prefix = apiPrefixes[patternIndex % apiPrefixes.length];
-    const resource = resources[patternIndex % resources.length];
-    patterns.push({
-      pattern: `${prefix}/${resource}/:id(\\d+)/data`,
-      value: `complex-${patternIndex}`,
-    });
-    patternIndex++;
-  }
-
-  return patterns;
-}
-
-/**
- * Generate test paths that will match various patterns
- */
-function generateTestPaths(
-  patterns: Array<{pattern: string; value: string}>,
-): string[] {
-  const paths: string[] = [];
-
-  // Generate paths that match the patterns
-  for (const patternDef of patterns.slice(0, Math.min(50, patterns.length))) {
-    const pattern = patternDef.pattern;
-
-    if (pattern.includes(':id(\\d+)')) {
-      paths.push(pattern.replace(':id(\\d+)', '123'));
-    } else if (pattern.includes(':id')) {
-      paths.push(pattern.replace(':id', '42'));
-    } else if (pattern.includes(':subId')) {
-      paths.push(pattern.replace(':subId', '99'));
-    } else if (pattern.includes('*')) {
-      paths.push(pattern.replace('*', 'some/nested/path'));
+    if (i % 10 === 9) {
+      inits.push({pathname: `/api/v1/${resource}/item/:id/details`});
     } else {
-      paths.push(pattern);
+      inits.push({pathname: `/api/v1/${resource}/page-${i}`});
     }
   }
+  return inits;
+};
 
-  // Add some paths that won't match anything (for testing miss scenarios)
-  paths.push('/nonexistent/path');
-  paths.push('/another/missing/route');
-  paths.push('/api/unknown/resource');
-
-  return paths;
-}
-
-/**
- * Setup a list with the given patterns
- */
-function setupList<T extends URLPatternListLike<string>>(
-  listFactory: () => T,
-  patterns: Array<{pattern: string; value: string}>,
-): T {
-  const list = listFactory();
-  for (const {pattern, value} of patterns) {
-    list.addPattern(new URLPattern({pathname: pattern}), value);
-  }
-  return list;
-}
-
-/**
- * Run benchmarks for a specific pattern count
- */
-function runBenchmarkSet(patternCount: number) {
-  console.log(`\n📊 Benchmarking with ${patternCount} patterns`);
-  console.log('='.repeat(50));
-
-  const patterns = generatePatterns(patternCount);
-  const testPaths = generateTestPaths(patterns);
-
-  // Setup both implementations
-  const optimizedList = setupList(() => new URLPatternList<string>(), patterns);
-  const naiveList = setupList(
-    () => new NaiveURLPatternList<string>(),
-    patterns,
-  );
-
-  const benchmarkIterations = Math.max(1000, Math.floor(50000 / patternCount));
-
-  // Create benchmark functions
-  const optimizedFn = () => {
-    const path = testPaths[Math.floor(Math.random() * testPaths.length)];
-    optimizedList.match(path, 'https://example.com');
-  };
-
-  const naiveFn = () => {
-    const path = testPaths[Math.floor(Math.random() * testPaths.length)];
-    naiveList.match(path, 'https://example.com');
-  };
-
-  // Run round-robin benchmark
-  const results = benchmarkRoundRobin(
-    optimizedFn,
-    naiveFn,
-    benchmarkIterations,
-  );
-
-  const optimizedResult = results.optimized;
-  const naiveResult = results.naive;
-
-  // Calculate speedup
-  const speedup = optimizedResult.opsPerSecond / naiveResult.opsPerSecond;
-
-  console.log(
-    `Optimized:  ${optimizedResult.opsPerSecond.toFixed(0).padStart(8)} ops/sec (${optimizedResult.avgTimeMs.toFixed(3)}ms avg)`,
-  );
-  console.log(
-    `Naive:      ${naiveResult.opsPerSecond.toFixed(0).padStart(8)} ops/sec (${naiveResult.avgTimeMs.toFixed(3)}ms avg)`,
-  );
-  console.log(`Speedup:    ${speedup.toFixed(2)}x faster`);
-
-  return {optimized: optimizedResult, naive: naiveResult, speedup};
-}
-
-/**
- * Test that both implementations produce the same results
- */
-function validateCorrectness(patternCount: number = 100) {
-  console.log('🔍 Validating correctness...');
-
-  const patterns = generatePatterns(patternCount);
-  const testPaths = generateTestPaths(patterns);
-
-  const optimizedList = setupList(() => new URLPatternList<string>(), patterns);
-  const naiveList = setupList(
-    () => new NaiveURLPatternList<string>(),
-    patterns,
-  );
-
-  let mismatches = 0;
-  for (const path of testPaths) {
-    const optimizedResult = optimizedList.match(path, 'https://example.com');
-    const naiveResult = naiveList.match(path, 'https://example.com');
-
-    // Compare results
-    if ((optimizedResult === null) !== (naiveResult === null)) {
-      console.error(`❌ Mismatch for path: ${path}`);
-      console.error(
-        `   Optimized: ${optimizedResult ? optimizedResult.value : 'null'}`,
-      );
-      console.error(`   Naive: ${naiveResult ? naiveResult.value : 'null'}`);
-      mismatches++;
-    } else if (
-      optimizedResult &&
-      naiveResult &&
-      optimizedResult.value !== naiveResult.value
-    ) {
-      console.error(`❌ Value mismatch for path: ${path}`);
-      console.error(`   Optimized: ${optimizedResult.value}`);
-      console.error(`   Naive: ${naiveResult.value}`);
-      mismatches++;
+/** Patterns that never enter the fixed index: regex, optional, multi-component. */
+const complexPatterns = (count: number): Array<URLPatternInit> => {
+  const inits: Array<URLPatternInit> = [];
+  for (let i = 0; i < count; i++) {
+    switch (i % 4) {
+      case 0:
+        inits.push({pathname: `/api/v${i}/:id(\\d+)/data`});
+        break;
+      case 1:
+        inits.push({pathname: `/api/res-${i}{/:sub}?`});
+        break;
+      case 2:
+        inits.push({pathname: `/api/files-${i}/:path*`});
+        break;
+      default:
+        inits.push({
+          hostname: 'example.com',
+          pathname: `/api/multi/:id`,
+          search: `q=:q`,
+        });
+        break;
     }
   }
+  return inits;
+};
 
-  if (mismatches === 0) {
-    console.log('✅ All results match - implementations are equivalent');
-  } else {
-    console.error(`❌ Found ${mismatches} mismatches`);
-    process.exit(1);
-  }
-}
+const scenarios = (count: number): Array<Scenario> => [
+  {
+    name: 'realistic',
+    patternInits: realisticPatterns(count),
+    hit: `/api/v1/${['users', 'posts', 'comments', 'orders', 'products', 'articles', 'photos', 'files'][(count - 2) % 8]}/page-${count - 2}`,
+    miss: '/api/v1/users/nonexistent',
+  },
+  {
+    name: 'static-only',
+    patternInits: Array.from({length: count}, (_, i) => ({
+      pathname: `/static/group-${i % 25}/asset-${i}.dat`,
+    })),
+    hit: `/static/group-${(count - 1) % 25}/asset-${count - 1}.dat`,
+    miss: '/static/group-0/not-there.dat',
+  },
+  {
+    name: 'complex',
+    patternInits: complexPatterns(count),
+    hit: `/api/v${count - 4}/123/data`,
+    miss: '/api/v1/abc/data',
+  },
+  {
+    name: 'front-conservative',
+    patternInits: [
+      {pathname: '/assets/:path*'},
+      ...Array.from({length: count - 1}, (_, i) => ({
+        pathname: `/img/catalog/item-${i}`,
+      })),
+    ],
+    hit: `/img/catalog/item-${count - 2}`,
+    miss: '/img/catalog/missing',
+  },
+];
 
-/**
- * Benchmark pattern addition performance
- */
-function benchmarkPatternAddition() {
-  console.log('\n🔧 Benchmarking Pattern Addition');
-  console.log('='.repeat(50));
+const median = (values: Array<number>): number => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+};
 
-  const patternCounts = [100, 500, 1000];
+const SAMPLES = 5;
 
-  for (const count of patternCounts) {
-    const patterns = generatePatterns(count);
+const runScenario = (scenario: Scenario): void => {
+  const count = scenario.patternInits.length;
+  const lookupsPerSample = Math.max(
+    25,
+    Math.min(500, Math.floor(50000 / count)),
+  );
+  const warmup = Math.max(5, Math.min(100, Math.floor(lookupsPerSample / 5)));
+  const patterns = scenario.patternInits.map((init) => new URLPattern(init));
 
-    // Create benchmark functions
-    const optimizedFn = () => {
-      const list = new URLPatternList<string>();
-      for (const {pattern, value} of patterns) {
-        list.addPattern(new URLPattern({pathname: pattern}), value);
+  for (const impl of implementations) {
+    // Construction: median list-build time over SAMPLES fresh builds.
+    const builds: Array<number> = [];
+    let list!: AnyList;
+    for (let sample = 0; sample < SAMPLES; sample++) {
+      const start = performance.now();
+      list = impl.create();
+      for (let i = 0; i < count; i++) {
+        list.addPattern(patterns[i], i);
       }
-    };
+      builds.push(performance.now() - start);
+    }
 
-    const naiveFn = () => {
-      const list = new NaiveURLPatternList<string>();
-      for (const {pattern, value} of patterns) {
-        list.addPattern(new URLPattern({pathname: pattern}), value);
+    // Sanity: all implementations agree on hit and miss values.
+    const hitMatch = list.match(scenario.hit, 'https://example.com');
+    const missMatch = list.match(scenario.miss, 'https://example.com');
+
+    // Hit/miss: round-robin warmup, then SAMPLES samples of per-lookup means.
+    const time = (input: string): number => {
+      for (let i = 0; i < warmup; i++) {
+        list.match(input, 'https://example.com');
       }
+      const samples: Array<number> = [];
+      for (let sample = 0; sample < SAMPLES; sample++) {
+        const start = performance.now();
+        for (let i = 0; i < lookupsPerSample; i++) {
+          list.match(input, 'https://example.com');
+        }
+        samples.push((performance.now() - start) / lookupsPerSample);
+      }
+      return median(samples);
     };
+    const hitMs = time(scenario.hit);
+    const missMs = time(scenario.miss);
 
-    // Run round-robin benchmark with fewer iterations for setup benchmarks
-    const results = benchmarkRoundRobin(optimizedFn, naiveFn, 20);
+    // Retained memory: heapUsed delta across a gc-bracketed build. Patterns
+    // are constructed outside the bracket and not counted.
+    const retainedSamples: Array<number> = [];
+    const kept: Array<AnyList> = [];
+    for (let sample = 0; sample < SAMPLES; sample++) {
+      gc();
+      const before = process.memoryUsage().heapUsed;
+      const fresh = impl.create();
+      for (let i = 0; i < count; i++) {
+        fresh.addPattern(patterns[i], i);
+      }
+      gc();
+      retainedSamples.push(process.memoryUsage().heapUsed - before);
+      kept.push(fresh);
+    }
+    kept.length = 0;
 
-    const optimizedResult = results.optimized;
-    const naiveResult = results.naive;
-    const speedup = naiveResult.avgTimeMs / optimizedResult.avgTimeMs;
+    // Transient allocation per lookup: heapUsed delta across K lookups with
+    // no gc, divided by K. No GC is expected mid-loop at this volume; the
+    // number includes the normalized URL and the exec result per call.
+    const transientSamples: Array<number> = [];
+    const transientK = 500;
+    for (let sample = 0; sample < SAMPLES + 2; sample++) {
+      gc();
+      const before = process.memoryUsage().heapUsed;
+      for (let i = 0; i < transientK; i++) {
+        list.match(scenario.hit, 'https://example.com');
+      }
+      const delta = process.memoryUsage().heapUsed - before;
+      if (sample >= 2) {
+        transientSamples.push(delta / transientK);
+      }
+    }
 
-    console.log(`\n${count} patterns:`);
-    console.log(`  Optimized: ${optimizedResult.avgTimeMs.toFixed(2)}ms`);
-    console.log(`  Naive:     ${naiveResult.avgTimeMs.toFixed(2)}ms`);
     console.log(
-      `  Difference: ` + (speedup >= 1)
-        ? speedup.toFixed(2) + 'x faster (naive)'
-        : (1 / speedup).toFixed(2) + 'x slower (naive)',
+      JSON.stringify({
+        scenario: scenario.name,
+        count,
+        impl: impl.name,
+        samples: SAMPLES,
+        lookupsPerSample,
+        warmup,
+        buildMedianMs: median(builds),
+        hitMedianMs: hitMs,
+        missMedianMs: missMs,
+        hitValue: hitMatch?.value ?? null,
+        missValue: missMatch?.value ?? null,
+        hitCandidates: list.candidateCount?.(
+          scenario.hit,
+          'https://example.com',
+        ),
+        missCandidates: list.candidateCount?.(
+          scenario.miss,
+          'https://example.com',
+        ),
+        retainedBytesMedian: median(retainedSamples),
+        retainedBytesPerPattern: median(retainedSamples) / count,
+        transientBytesPerHit: median(transientSamples),
+      }),
     );
   }
+};
+
+console.log(
+  JSON.stringify({
+    runtime: `node ${process.version}`,
+    platform: `${process.platform} ${process.arch}`,
+    cpu: os.cpus()[0]?.model,
+    gcControl: 'node --expose-gc; global.gc() around memory measurements',
+    samples: SAMPLES,
+    note:
+      'construction = list build only (patterns pre-constructed, native URLPattern); ' +
+      'hit/miss = median of per-lookup means; retained = gc-bracketed heapUsed delta; ' +
+      'transient = heapUsed delta across 500 lookups without gc (approximate)',
+  }),
+);
+
+for (const count of [100, 1000, 5000]) {
+  for (const scenario of scenarios(count)) {
+    runScenario(scenario);
+  }
 }
-
-console.log('🚀 URLPatternList Performance Benchmark');
-console.log('==========================================');
-
-// Validate correctness first
-validateCorrectness();
-
-// Benchmark pattern addition
-benchmarkPatternAddition();
-
-// Run matching benchmarks with different pattern counts
-const patternCounts = [10, 50, 100, 500, 1000, 2000];
-const results: Array<{count: number; speedup: number}> = [];
-
-for (const count of patternCounts) {
-  const result = runBenchmarkSet(count);
-  results.push({count, speedup: result.speedup});
-}
-
-// Summary
-console.log('\n📈 Performance Summary');
-console.log('='.repeat(50));
-console.log('Pattern Count | Speedup');
-console.log('------------- | -------');
-for (const {count, speedup} of results) {
-  console.log(`${count.toString().padStart(11)} | ${speedup.toFixed(2)}x`);
-}
-
-const avgSpeedup =
-  results.reduce((sum, r) => sum + r.speedup, 0) / results.length;
-console.log(`\nAverage speedup: ${avgSpeedup.toFixed(2)}x`);
