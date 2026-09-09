@@ -1,4 +1,4 @@
-# @open-element/url-pattern-list
+# @openelement/url-pattern-list
 
 Efficiently match URL paths against a collection of URL patterns using a
 fixed pathname-literal index with conservative fallback.
@@ -32,13 +32,13 @@ object like a server route handler.
 ## Installation
 
 ```sh
-npm i @open-element/url-pattern-list
+npm i @openelement/url-pattern-list
 ```
 
 ## Quick Start
 
 ```typescript
-import {URLPatternList} from '@open-element/url-pattern-list';
+import {URLPatternList} from '@openelement/url-pattern-list';
 
 // Create a new pattern list
 const routes = new URLPatternList<string>();
@@ -80,7 +80,7 @@ npm run benchmark
 The main class for managing and matching URL patterns.
 
 ```ts
-import {URLPatternList} from '@open-element/url-pattern-list';
+import {URLPatternList} from '@openelement/url-pattern-list';
 ```
 
 #### Methods

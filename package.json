@@ -1,5 +1,5 @@
 {
-  "name": "@open-element/url-pattern-list",
+  "name": "@openelement/url-pattern-list",
   "version": "0.6.0",
   "description": "Efficiently match URLs against a collection of URL patterns",
   "type": "module",

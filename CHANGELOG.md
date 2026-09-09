@@ -22,7 +22,7 @@ v0.5.0 (commit `4911e649cc11860c7da90c9d0d9b05626c5cbb83`). See
   per-component prefix tree node classes and `_treeRoot` (internal but
   exported in 0.5.0), and the visualizer (`./visualizer.js` export,
   `visualizer.md`), which rendered the removed tree internals.
-- **Package**: renamed to `@open-element/url-pattern-list`. Version 0.6.0
+- **Package**: renamed to `@openelement/url-pattern-list`. Version 0.6.0
   is a minor bump of the fork's 0.x line for the internal matching-semantics
   change and removed internal exports.
 

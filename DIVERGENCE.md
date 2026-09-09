@@ -69,7 +69,7 @@ other than the pathname literal.
 
 ## Package
 
-- Renamed to `@open-element/url-pattern-list`, version `0.6.0`: the
+- Renamed to `@openelement/url-pattern-list`, version `0.6.0`: the
   internal matching semantics changed and internal exports were removed (a
   minor bump under the fork's 0.x line). See `CHANGELOG.md`.
 - Repository/bugs/homepage point at `open-element/url-pattern-list`.
